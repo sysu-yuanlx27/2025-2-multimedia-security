@@ -1,7 +1,7 @@
-#import "@local/sysu-exercise:0.1.0": *
+#import "@local/sysu-assignment:0.1.0": *
 #import "@preview/fletcher:0.5.8": diagram, node, edge
 
-#show: exercise.with(
+#show: assignment.with(
   title: "作业一",
   subtitle: "多媒体安全技术（理论）",
   student: (name: "元朗曦", id: "23336294"),
