@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from jpeg import channel_compress, jpeg_round
+from .jpeg import channel_compress, jpeg_round
 
 
 def _ensure_recompression_direction(source_quant_table: np.ndarray, channel_quant_table: np.ndarray) -> None:

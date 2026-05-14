@@ -79,12 +79,6 @@ def load_grayscale(path: Path) -> np.ndarray:
         return np.asarray(image.convert("L"), dtype=np.float64)
 
 
-def save_grayscale(path: Path, image: np.ndarray) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    clipped = np.clip(np.rint(image), 0, 255).astype(np.uint8)
-    Image.fromarray(clipped, mode="L").save(path)
-
-
 def pad_to_blocks(image: np.ndarray) -> tuple[np.ndarray, tuple[int, int]]:
     height, width = image.shape
     padded_height = ((height + 7) // 8) * 8

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from jpeg import CoeffImage, DCT_MATRIX, coeffs_to_image
+from .jpeg import CoeffImage, DCT_MATRIX, coeffs_to_image
 
 
 WET_COST = 1.0e13

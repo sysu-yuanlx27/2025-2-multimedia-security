@@ -6,8 +6,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from costs import WET_COST
-from jpeg import nonzero_ac_mask
+from .costs import WET_COST
+from .jpeg import nonzero_ac_mask
 
 
 @dataclass(frozen=True)
