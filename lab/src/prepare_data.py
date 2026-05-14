@@ -1,26 +1,26 @@
-"""Prepare raw BOSSbase and UCID images for the experiments."""
+"""Prepare local BOSSbase and UCID images for the experiments."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import random
 from pathlib import Path
-import shutil
-import tarfile
-from urllib.error import URLError
-from urllib.parse import urlparse
-from urllib.request import urlretrieve
-import zipfile
 
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
+from rich.console import Console
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 
 
 LAB_ROOT = Path(__file__).resolve().parents[1]
 DATA_ROOT = LAB_ROOT / "data"
 RAW_ROOT = DATA_ROOT / "raw"
 PREPARED_ROOT = DATA_ROOT / "prepared"
-DOWNLOAD_ROOT = RAW_ROOT / "downloads"
 IMAGE_SUFFIXES = {".bmp", ".jpg", ".jpeg", ".png", ".pgm", ".tif", ".tiff"}
 ORIGINAL_QUALITIES = (100, 95)
+SAMPLE_IMAGES_PER_DATASET = 100
+SEED = 20260514
+CONSOLE = Console()
 
 
 @dataclass(frozen=True)
@@ -29,7 +29,6 @@ class DatasetSpec:
     display_name: str
     raw_dir: Path
     prepared_prefix: str
-    urls: tuple[str, ...]
     manual_url: str
 
 
@@ -39,7 +38,6 @@ DATASETS = (
         display_name="BOSSbase-1.01",
         raw_dir=RAW_ROOT / "BOSSbase-1.01",
         prepared_prefix="bossbase",
-        urls=("https://dde.binghamton.edu/download/ImageDB/BOSSbase_1.01.zip",),
         manual_url="https://dde.binghamton.edu/download/",
     ),
     DatasetSpec(
@@ -47,7 +45,6 @@ DATASETS = (
         display_name="UCID",
         raw_dir=RAW_ROOT / "UCID",
         prepared_prefix="ucid",
-        urls=("http://jasoncantarella.com/downloads/ucid.v2.tar.gz",),
         manual_url="https://qualinet.github.io/databases/image/uncompressed_colour_image_database_ucid/",
     ),
 )
@@ -65,63 +62,8 @@ def _missing_datasets() -> list[DatasetSpec]:
     return [spec for spec in DATASETS if not _has_images(spec.raw_dir)]
 
 
-def _archive_name(url: str) -> str:
-    name = Path(urlparse(url).path).name
-    if not name:
-        raise ValueError(f"cannot infer archive name from {url}")
-    return name
-
-
-def _extract_archive(archive: Path, destination: Path) -> None:
-    destination.mkdir(parents=True, exist_ok=True)
-    if archive.suffix == ".zip":
-        with zipfile.ZipFile(archive) as file:
-            file.extractall(destination)
-    elif archive.name.endswith((".tar.gz", ".tgz")):
-        with tarfile.open(archive, "r:gz") as file:
-            file.extractall(destination)
-    else:
-        raise ValueError(f"unsupported archive format: {archive}")
-
-
-def _best_image_root(path: Path) -> Path:
-    candidates = [item for item in path.rglob("*") if item.is_dir()]
-    candidates.append(path)
-    return max(candidates, key=lambda item: len(_iter_images(item)))
-
-
-def _install_extracted_dataset(extract_dir: Path, raw_dir: Path) -> None:
-    image_root = _best_image_root(extract_dir)
-    if raw_dir.exists():
-        shutil.rmtree(raw_dir)
-    raw_dir.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(image_root), str(raw_dir))
-
-
-def _download_dataset(spec: DatasetSpec) -> bool:
-    DOWNLOAD_ROOT.mkdir(parents=True, exist_ok=True)
-    for url in spec.urls:
-        archive = DOWNLOAD_ROOT / _archive_name(url)
-        extract_dir = DOWNLOAD_ROOT / f"{spec.key}-extract"
-        try:
-            print(f"Downloading {spec.display_name} from {url}")
-            urlretrieve(url, archive)
-            if extract_dir.exists():
-                shutil.rmtree(extract_dir)
-            _extract_archive(archive, extract_dir)
-            _install_extracted_dataset(extract_dir, spec.raw_dir)
-        except (OSError, URLError, ValueError, zipfile.BadZipFile, tarfile.TarError) as exc:
-            print(f"Failed to download {spec.display_name}: {exc}")
-            continue
-
-        if _has_images(spec.raw_dir):
-            return True
-        print(f"Downloaded archive for {spec.display_name}, but no images were found.")
-    return False
-
-
 def _print_manual_instructions(missing: list[DatasetSpec]) -> None:
-    print("Please download the missing datasets manually and place them here:")
+    print("Missing raw datasets. Please download them manually and place them here:")
     for spec in missing:
         print(f"- {spec.display_name}: {spec.raw_dir}")
         print(f"  Source: {spec.manual_url}")
@@ -132,27 +74,8 @@ def _ensure_raw_datasets() -> None:
     if not missing:
         return
 
-    print("Missing raw datasets:")
-    for spec in missing:
-        print(f"- {spec.display_name}")
-
-    try:
-        answer = input("Download missing datasets automatically? [y/N]: ").strip().lower()
-    except EOFError:
-        answer = ""
-
-    if answer not in {"y", "yes"}:
-        _print_manual_instructions(missing)
-        raise SystemExit(1)
-
-    failed: list[DatasetSpec] = []
-    for spec in missing:
-        if not _download_dataset(spec):
-            failed.append(spec)
-
-    if failed:
-        _print_manual_instructions(failed)
-        raise SystemExit(1)
+    _print_manual_instructions(missing)
+    raise SystemExit(1)
 
 
 def _reset_output_dir(path: Path) -> None:
@@ -161,15 +84,81 @@ def _reset_output_dir(path: Path) -> None:
         image.unlink()
 
 
-def _write_prepared_dataset(spec: DatasetSpec, quality: int) -> int:
+def _make_progress() -> Progress:
+    return Progress(
+        TextColumn("[progress.description]{task.description:<28}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TextColumn("{task.percentage:>6.2f}%"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=CONSOLE,
+    )
+
+
+def _sample_images(spec: DatasetSpec) -> list[Path]:
+    images = _iter_images(spec.raw_dir)
+    if len(images) <= SAMPLE_IMAGES_PER_DATASET:
+        return images
+
+    seed_material = f"{SEED}:{spec.key}:prepare-sample".encode("utf-8")
+    sample_seed = int.from_bytes(hashlib.sha256(seed_material).digest()[:4], "big")
+    shuffled = images.copy()
+    random.Random(sample_seed).shuffle(shuffled)
+
+    sampled: list[Path] = []
+    with _make_progress() as progress:
+        task = progress.add_task(f"Sampling {spec.display_name}", total=SAMPLE_IMAGES_PER_DATASET)
+        for path in shuffled:
+            try:
+                with Image.open(path) as image:
+                    image.verify()
+            except (OSError, UnidentifiedImageError) as error:
+                CONSOLE.print(f"Skipping unreadable image during sampling {path}: {error}")
+                continue
+
+            sampled.append(path)
+            progress.advance(task)
+            if len(sampled) == SAMPLE_IMAGES_PER_DATASET:
+                break
+
+    if len(sampled) < SAMPLE_IMAGES_PER_DATASET:
+        raise RuntimeError(
+            f"{spec.display_name} has only {len(sampled)} readable images; "
+            f"{SAMPLE_IMAGES_PER_DATASET} are required"
+        )
+
+    return sorted(sampled)
+
+
+def _write_prepared_dataset(spec: DatasetSpec, quality: int, images: list[Path]) -> tuple[int, int]:
     output_dir = PREPARED_ROOT / f"{spec.prepared_prefix}-q{quality}"
     _reset_output_dir(output_dir)
-    images = _iter_images(spec.raw_dir)
-    for index, path in enumerate(images, start=1):
-        with Image.open(path) as image:
-            prepared = image.convert("L")
-            prepared.save(output_dir / f"{index:05d}.jpg", quality=quality, optimize=True)
-    return len(images)
+    label = f"{spec.prepared_prefix}-q{quality}"
+    CONSOLE.print(
+        f"Preparing {spec.display_name} q{quality}: {len(images)} sampled images -> {output_dir}",
+    )
+
+    written = 0
+    skipped = 0
+    with _make_progress() as progress:
+        task = progress.add_task(label, total=len(images))
+        for path in images:
+            try:
+                with Image.open(path) as image:
+                    prepared = image.convert("L")
+                    written += 1
+                    prepared.save(output_dir / f"{written:05d}.jpg", quality=quality, optimize=True)
+            except (OSError, UnidentifiedImageError) as error:
+                skipped += 1
+                CONSOLE.print(f"Skipping unreadable image {path}: {error}")
+            finally:
+                progress.advance(task)
+
+    if written != len(images):
+        raise RuntimeError(f"expected to prepare {len(images)} images for {label}, but wrote {written}")
+
+    return written, skipped
 
 
 def prepare() -> None:
@@ -177,8 +166,15 @@ def prepare() -> None:
     PREPARED_ROOT.mkdir(parents=True, exist_ok=True)
 
     for spec in DATASETS:
+        images = _sample_images(spec)
+        CONSOLE.print(
+            f"Sampled {len(images)} images from {spec.display_name} "
+            f"for qualities {', '.join(str(quality) for quality in ORIGINAL_QUALITIES)}",
+        )
         for quality in ORIGINAL_QUALITIES:
-            count = _write_prepared_dataset(spec, quality)
+            count, skipped = _write_prepared_dataset(spec, quality, images)
             output_dir = PREPARED_ROOT / f"{spec.prepared_prefix}-q{quality}"
-            print(f"Prepared {count} images in {output_dir}")
-
+            if skipped:
+                CONSOLE.print(f"Prepared {count} images in {output_dir} ({skipped} skipped)")
+            else:
+                CONSOLE.print(f"Prepared {count} images in {output_dir}")
